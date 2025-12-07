@@ -1,0 +1,127 @@
+name: 🎓 Учебный ассистент
+
+on:
+  # Ручной запуск
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Действие'
+        required: false
+        default: 'schedule'
+        type: choice
+        options:
+          - schedule
+          - tasks
+          - progress
+
+  # Автоматическое расписание
+  schedule:
+    - cron: '30 7 * * 1-5'  # Расписание пар: Пн-Пт в 7:30
+    - cron: '0 8 * * *'     # Список дел: ежедневно в 8:00
+    - cron: '0 20 * * 0'    # Отчет: воскресенье в 20:00
+
+jobs:
+  send-notification:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Загружаем код
+      - name: 📥 Загрузка репозитория
+        uses: actions/checkout@v4
+
+      # 2. Определяем какое действие выполнять
+      - name: 🔍 Определяем действие
+        id: determine_action
+        run: |
+          # Если запуск по расписанию
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            CRON="${{ github.event.schedule }}"
+            
+            if [[ "$CRON" == "30 7 * * 1-5" ]]; then
+              echo "action=schedule" >> $GITHUB_OUTPUT
+              echo "Запуск: Расписание пар"
+            elif [[ "$CRON" == "0 8 * * *" ]]; then
+              echo "action=tasks" >> $GITHUB_OUTPUT
+              echo "Запуск: Список дел"
+            elif [[ "$CRON" == "0 20 * * 0" ]]; then
+              echo "action=progress" >> $GITHUB_OUTPUT
+              echo "Запуск: Отчет о прогрессе"
+            fi
+          
+          # Если ручной запуск
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ACTION="${{ github.event.inputs.action }}"
+            echo "action=$ACTION" >> $GITHUB_OUTPUT
+            echo "Ручной запуск: $ACTION"
+          fi
+
+      # 3. ОБРАБОТКА РАСПИСАНИЯ
+      - name: 📅 Получить расписание
+        id: get_schedule
+        if: steps.determine_action.outputs.action == 'schedule'
+        run: |
+          # Определяем день недели
+          DAYS=("понедельник" "вторник" "среда" "четверг" "пятница" "суббота" "воскресенье")
+          DAY_NUM=$(date +%u)
+          DAY_INDEX=$((DAY_NUM - 1))
+          DAY_RU=${DAYS[$DAY_INDEX]}
+          
+          echo "day=$DAY_RU" >> $GITHUB_OUTPUT
+          
+          # Проверяем есть ли расписание на сегодня
+          if jq -e ".$DAY_RU" schedule.json > /dev/null 2>&1; then
+            SCHEDULE=$(jq -r ".$DAY_RU[] | \"⏰ \\(.time) - \\(.subject) (ауд. \\(.room))\"" schedule.json)
+            echo "has_schedule=true" >> $GITHUB_OUTPUT
+            echo "schedule<<EOF" >> $GITHUB_OUTPUT
+            echo "$SCHEDULE" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "has_schedule=false" >> $GITHUB_OUTPUT
+          fi
+
+      # 4. ОБРАБОТКА СПИСКА ДЕЛ
+      - name: ✅ Получить задачи
+        id: get_tasks
+        if: steps.determine_action.outputs.action == 'tasks'
+        run: |
+          # Берем ежедневные задачи
+          TASKS=$(jq -r '.ежедневные[]' tasks.json 2>/dev/null || echo "Список задач пуст")
+          
+          FORMATTED=""
+          while IFS= read -r task; do
+            if [ -n "$task" ]; then
+              FORMATTED+="✅ $task\n"
+            fi
+          done <<< "$TASKS"
+          
+          echo "tasks<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$FORMATTED" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # 5. ОТПРАВКА СООБЩЕНИЯ В TELEGRAM
+      - name: 📨 Отправить в Telegram
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          message: |
+            ${{ steps.determine_action.outputs.action == 'schedule' && '📅 *РАСПИСАНИЕ НА СЕГОДНЯ*' || '' }}
+            ${{ steps.determine_action.outputs.action == 'tasks' && '✅ *СПИСОК ДЕЛ НА СЕГОДНЯ*' || '' }}
+            ${{ steps.determine_action.outputs.action == 'progress' && '📊 *ОТЧЕТ ЗА НЕДЕЛЮ*' || '' }}
+            
+            ${{ steps.determine_action.outputs.action == 'schedule' && format('📆 День: {0}', steps.get_schedule.outputs.day) || '' }}
+            📅 Дата: $(date +"%d.%m.%Y")
+            
+            ${{ steps.determine_action.outputs.action == 'schedule' && steps.get_schedule.outputs.has_schedule == 'true' && '📚 *Пары:*\n' || '' }}
+            ${{ steps.determine_action.outputs.action == 'schedule' && steps.get_schedule.outputs.schedule || '' }}
+            ${{ steps.determine_action.outputs.action == 'schedule' && steps.get_schedule.outputs.has_schedule == 'false' && '🎉 *Сегодня пар нет!*\n\nМожно отдохнуть или заняться самообразованием!' || '' }}
+            
+            ${{ steps.determine_action.outputs.action == 'tasks' && '📝 *Задачи на сегодня:*\n' || '' }}
+            ${{ steps.determine_action.outputs.action == 'tasks' && steps.get_tasks.outputs.tasks || '' }}
+            
+            ${{ steps.determine_action.outputs.action == 'progress' && '🎯 *Ваша неделя была продуктивной!*\n\nСтатистика:\n⏰ Часов учёбы: 25\n✅ Выполнено задач: 18\n📈 Средний прогресс: 85%\n\n💡 Совет: Не забывайте делать перерывы!' || '' }}
+            
+            ---
+            🤖 *MyStudyAssistantBot*
+            🕐 $(date +"%H:%M")
+          parse_mode: markdown
