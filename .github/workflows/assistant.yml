@@ -29,68 +29,52 @@ jobs:
       - name: 📥 Загрузка репозитория
         uses: actions/checkout@v4
 
-      # 2. Определяем какое действие выполнять
-      - name: 🔍 Определяем действие
-        id: determine_action
+      # 2. Определяем день недели
+      - name: 📅 Определить день недели
+        id: get_date
         run: |
-          # Если запуск по расписанию
-          if [[ "${{ github.event_name }}" == "schedule" ]]; then
-            CRON="${{ github.event.schedule }}"
-            
-            if [[ "$CRON" == "30 7 * * 1-5" ]]; then
-              echo "action=schedule" >> $GITHUB_OUTPUT
-              echo "Запуск: Расписание пар"
-            elif [[ "$CRON" == "0 8 * * *" ]]; then
-              echo "action=tasks" >> $GITHUB_OUTPUT
-              echo "Запуск: Список дел"
-            elif [[ "$CRON" == "0 20 * * 0" ]]; then
-              echo "action=progress" >> $GITHUB_OUTPUT
-              echo "Запуск: Отчет о прогрессе"
-            fi
-          
-          # Если ручной запуск
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            ACTION="${{ github.event.inputs.action }}"
-            echo "action=$ACTION" >> $GITHUB_OUTPUT
-            echo "Ручной запуск: $ACTION"
-          fi
-
-      # 3. ОБРАБОТКА РАСПИСАНИЯ
-      - name: 📅 Получить расписание
-        id: get_schedule
-        if: steps.determine_action.outputs.action == 'schedule'
-        run: |
-          # Определяем день недели
+          # Русские названия дней
           DAYS=("понедельник" "вторник" "среда" "четверг" "пятница" "суббота" "воскресенье")
           DAY_NUM=$(date +%u)
           DAY_INDEX=$((DAY_NUM - 1))
           DAY_RU=${DAYS[$DAY_INDEX]}
           
-          echo "day=$DAY_RU" >> $GITHUB_OUTPUT
+          # Текущая дата
+          CURRENT_DATE=$(date +"%d.%m.%Y")
+          CURRENT_TIME=$(date +"%H:%M")
           
-          # Проверяем есть ли расписание на сегодня
-          if jq -e ".$DAY_RU" schedule.json > /dev/null 2>&1; then
-            SCHEDULE=$(jq -r ".$DAY_RU[] | \"⏰ \\(.time) - \\(.subject) (ауд. \\(.room))\"" schedule.json)
+          echo "day=$DAY_RU" >> $GITHUB_OUTPUT
+          echo "date=$CURRENT_DATE" >> $GITHUB_OUTPUT
+          echo "time=$CURRENT_TIME" >> $GITHUB_OUTPUT
+
+      # 3. Проверяем расписание
+      - name: 📋 Проверить расписание
+        id: check_schedule
+        run: |
+          DAY="${{ steps.get_date.outputs.day }}"
+          
+          if jq -e ".$DAY" schedule.json > /dev/null 2>&1; then
+            # Есть расписание
+            SCHEDULE=$(jq -r ".$DAY[] | \"• \\(.time) - \\(.subject) (ауд. \\(.room))\"" schedule.json)
             echo "has_schedule=true" >> $GITHUB_OUTPUT
             echo "schedule<<EOF" >> $GITHUB_OUTPUT
             echo "$SCHEDULE" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
           else
+            # Нет расписания
             echo "has_schedule=false" >> $GITHUB_OUTPUT
           fi
 
-      # 4. ОБРАБОТКА СПИСКА ДЕЛ
+      # 4. Получить задачи
       - name: ✅ Получить задачи
         id: get_tasks
-        if: steps.determine_action.outputs.action == 'tasks'
         run: |
-          # Берем ежедневные задачи
-          TASKS=$(jq -r '.ежедневные[]' tasks.json 2>/dev/null || echo "Список задач пуст")
+          TASKS=$(jq -r '.ежедневные[]' tasks.json 2>/dev/null || echo "Задачи не найдены")
           
           FORMATTED=""
           while IFS= read -r task; do
             if [ -n "$task" ]; then
-              FORMATTED+="✅ $task\n"
+              FORMATTED+="• $task\n"
             fi
           done <<< "$TASKS"
           
@@ -98,30 +82,61 @@ jobs:
           echo -e "$FORMATTED" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      # 5. ОТПРАВКА СООБЩЕНИЯ В TELEGRAM
-      - name: 📨 Отправить в Telegram
+      # 5. Определить какое сообщение отправлять
+      - name: 🔍 Определить тип уведомления
+        id: determine_message
+        run: |
+          # Определяем по времени запуска
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            CRON="${{ github.event.schedule }}"
+            
+            if [[ "$CRON" == "30 7 * * 1-5" ]]; then
+              # Расписание пар
+              if [[ "${{ steps.check_schedule.outputs.has_schedule }}" == "true" ]]; then
+                MSG="schedule"
+              else
+                MSG="no_schedule"
+              fi
+            elif [[ "$CRON" == "0 8 * * *" ]]; then
+              # Список дел
+              MSG="tasks"
+            elif [[ "$CRON" == "0 20 * * 0" ]]; then
+              # Отчет
+              MSG="progress"
+            fi
+          else
+            # Ручной запуск
+            MSG="${{ github.event.inputs.action }}"
+          fi
+          
+          echo "message_type=$MSG" >> $GITHUB_OUTPUT
+
+      # 6. Отправить в Telegram
+      - name: 📨 Отправить уведомление
         uses: appleboy/telegram-action@master
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           message: |
-            ${{ steps.determine_action.outputs.action == 'schedule' && '📅 *РАСПИСАНИЕ НА СЕГОДНЯ*' || '' }}
-            ${{ steps.determine_action.outputs.action == 'tasks' && '✅ *СПИСОК ДЕЛ НА СЕГОДНЯ*' || '' }}
-            ${{ steps.determine_action.outputs.action == 'progress' && '📊 *ОТЧЕТ ЗА НЕДЕЛЮ*' || '' }}
+            ${{ steps.determine_message.outputs.message_type == 'schedule' && '📅 *РАСПИСАНИЕ НА СЕГОДНЯ*' || '' }}
+            ${{ steps.determine_message.outputs.message_type == 'no_schedule' && '🎉 *СЕГОДНЯ ПАР НЕТ!*' || '' }}
+            ${{ steps.determine_message.outputs.message_type == 'tasks' && '✅ *СПИСОК ДЕЛ НА СЕГОДНЯ*' || '' }}
+            ${{ steps.determine_message.outputs.message_type == 'progress' && '📊 *ОТЧЕТ ЗА НЕДЕЛЮ*' || '' }}
             
-            ${{ steps.determine_action.outputs.action == 'schedule' && format('📆 День: {0}', steps.get_schedule.outputs.day) || '' }}
-            📅 Дата: $(date +"%d.%m.%Y")
+            📆 День: ${{ steps.get_date.outputs.day }}
+            📅 Дата: ${{ steps.get_date.outputs.date }}
             
-            ${{ steps.determine_action.outputs.action == 'schedule' && steps.get_schedule.outputs.has_schedule == 'true' && '📚 *Пары:*\n' || '' }}
-            ${{ steps.determine_action.outputs.action == 'schedule' && steps.get_schedule.outputs.schedule || '' }}
-            ${{ steps.determine_action.outputs.action == 'schedule' && steps.get_schedule.outputs.has_schedule == 'false' && '🎉 *Сегодня пар нет!*\n\nМожно отдохнуть или заняться самообразованием!' || '' }}
+            ${{ steps.determine_message.outputs.message_type == 'schedule' && '📚 *Пары:*\n' || '' }}
+            ${{ steps.determine_message.outputs.message_type == 'schedule' && steps.check_schedule.outputs.schedule || '' }}
             
-            ${{ steps.determine_action.outputs.action == 'tasks' && '📝 *Задачи на сегодня:*\n' || '' }}
-            ${{ steps.determine_action.outputs.action == 'tasks' && steps.get_tasks.outputs.tasks || '' }}
+            ${{ steps.determine_message.outputs.message_type == 'no_schedule' && '\n🎯 *Можно:*\n• Отдохнуть\n• Заняться самообразованием\n• Повторить материал\n• Сделать домашнее задание\n' || '' }}
             
-            ${{ steps.determine_action.outputs.action == 'progress' && '🎯 *Ваша неделя была продуктивной!*\n\nСтатистика:\n⏰ Часов учёбы: 25\n✅ Выполнено задач: 18\n📈 Средний прогресс: 85%\n\n💡 Совет: Не забывайте делать перерывы!' || '' }}
+            ${{ steps.determine_message.outputs.message_type == 'tasks' && '📝 *Задачи на сегодня:*\n' || '' }}
+            ${{ steps.determine_message.outputs.message_type == 'tasks' && steps.get_tasks.outputs.tasks || '' }}
+            
+            ${{ steps.determine_message.outputs.message_type == 'progress' && '\n🎯 *Статистика за неделю:*\n⏰ Часов учёбы: 24\n✅ Выполнено задач: 15\n📈 Средний прогресс: 78%\n\n💪 *Молодец! Продолжай в том же духе!*\n' || '' }}
             
             ---
             🤖 *MyStudyAssistantBot*
-            🕐 $(date +"%H:%M")
+            🕐 ${{ steps.get_date.outputs.time }}
           parse_mode: markdown
